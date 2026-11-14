@@ -6,7 +6,7 @@
 #
 #   #!/bin/bash
 #   set -euo pipefail
-#   curl -fsSL https://raw.githubusercontent.com/johnqh/workflows/main/app_store/ci_post_clone.sh -o /tmp/ci_post_clone.sh
+#   curl -fsSL https://raw.githubusercontent.com/Sudobility/workflows/main/app_store/ci_post_clone.sh -o /tmp/ci_post_clone.sh
 #   exec bash /tmp/ci_post_clone.sh ios     # or: macos
 #
 # Argument 1: platform ("ios" default, or "macos" — macOS deletes Podfile.lock first).

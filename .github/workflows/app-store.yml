@@ -10,12 +10,12 @@
 #
 # Each job runs only when its platform is selected AND its credentials are set,
 # mirroring the secret-driven style of unified-cicd.yml. The toolkit scripts are
-# pulled by checking out johnqh/workflows alongside the app repo.
+# pulled by checking out Sudobility/workflows alongside the app repo.
 #
 # Caller example (.github/workflows/app-store.yml in the app repo):
 #   jobs:
 #     submit:
-#       uses: johnqh/workflows/.github/workflows/app-store.yml@main
+#       uses: Sudobility/workflows/.github/workflows/app-store.yml@main
 #       with:
 #         platforms: "google,microsoft"
 #         steps: "localize,submit"
@@ -51,7 +51,7 @@ on:
         type: string
         default: "22.x"
       workflows-ref:
-        description: "Ref of johnqh/workflows to use for the toolkit."
+        description: "Ref of Sudobility/workflows to use for the toolkit."
         type: string
         default: "main"
     secrets:
@@ -96,7 +96,7 @@ jobs:
           path: app
       - uses: actions/checkout@v4
         with:
-          repository: johnqh/workflows
+          repository: Sudobility/workflows
           ref: ${{ inputs.workflows-ref }}
           path: workflows
       - uses: actions/setup-node@v4
@@ -144,7 +144,7 @@ jobs:
           path: app
       - uses: actions/checkout@v4
         with:
-          repository: johnqh/workflows
+          repository: Sudobility/workflows
           ref: ${{ inputs.workflows-ref }}
           path: workflows
       - uses: actions/setup-java@v4
@@ -192,7 +192,7 @@ jobs:
           path: app
       - uses: actions/checkout@v4
         with:
-          repository: johnqh/workflows
+          repository: Sudobility/workflows
           ref: ${{ inputs.workflows-ref }}
           path: workflows
       - uses: oven-sh/setup-bun@v2

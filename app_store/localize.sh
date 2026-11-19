@@ -75,9 +75,16 @@ if [ -z "${WHISPERLY_API_KEY:-}" ]; then
   export WHISPERLY_API_KEY
 fi
 
+# Brand/proper-noun terms to keep verbatim across languages (info.json .localize.keepTerms).
+KEEP_ARGS=()
+while IFS= read -r term; do
+  [ -n "$term" ] && KEEP_ARGS+=(--keep "$term")
+done < <(jq -r '.localize.keepTerms[]? // empty' "$INFO_JSON" 2>/dev/null)
+
 echo "Translating store text in $STORE_LOCALES"
 echo "  endpoint: $FULL_URL"
-node "$LOCALIZE_BATCH" "$STORE_LOCALES" "$FULL_URL" "${PASSTHROUGH[@]}"
+[ ${#KEEP_ARGS[@]} -gt 0 ] && echo "  keeping verbatim: $(jq -rc '.localize.keepTerms // []' "$INFO_JSON")"
+node "$LOCALIZE_BATCH" "$STORE_LOCALES" "$FULL_URL" "${PASSTHROUGH[@]}" ${KEEP_ARGS[@]+"${KEEP_ARGS[@]}"}
 
 if [ "$FORMAT" = true ]; then
   echo ""

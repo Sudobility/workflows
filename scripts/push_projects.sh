@@ -1797,7 +1797,16 @@ commit_and_push() {
         git restore --staged -- node_modules 2>/dev/null || true
         log_success "Changes staged"
 
-        local version=$(bun -e "console.log(require('./package.json').version)" 2>/dev/null || echo "unknown")
+        local version
+        if [ "$PKG_MANAGER" = "python" ]; then
+            # No package.json; read the version from pyproject.toml with the same
+            # grep/sed bump_version uses (tomllib is 3.11+ only). Without this the
+            # commit message read below falls back to the literal "unknown".
+            version=$(grep -m1 '^version = "' pyproject.toml 2>/dev/null | sed -E 's/^version = "([^"]+)".*/\1/')
+            [ -n "$version" ] || version="unknown"
+        else
+            version=$(bun -e "console.log(require('./package.json').version)" 2>/dev/null || echo "unknown")
+        fi
         log_info "Preparing commit for version $version..."
 
         local commit_msg
@@ -2084,7 +2093,17 @@ process_project() {
 
     log_success "All validation checks passed"
 
-    if [ -f "$project_path/package.json" ]; then
+    if [ "$PKG_MANAGER" = "python" ]; then
+        # Python projects have no package.json, so the node block below never
+        # fires. Bump pyproject.toml here (bump_version has a python branch) or
+        # the version never moves, CI sees no release, and Docker never
+        # publishes. No lockfile pm_install: it has no python branch and would
+        # fall through to npm install (see the comment above the install block).
+        if ! bump_version "$project_path"; then
+            log_error "Failed to bump version for $project_name"
+            return 1
+        fi
+    elif [ -f "$project_path/package.json" ]; then
         if [ "$VERSION_BUMPED" = false ]; then
             log_info "Skipping version bump (React Native app)"
         elif ! bump_version "$project_path"; then

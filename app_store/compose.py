@@ -547,6 +547,56 @@ def compose_screenshot(raw_path, title, subtitle, config, frames_dir, frame_conf
 
 # ── Processing loop ─────────────────────────────────────────────────────────
 
+def _seq_key(filename):
+    """Sort key: numeric sequence from a '<n>.png' filename (0 if not numeric)."""
+    stem = filename[:-4] if filename.endswith(".png") else filename
+    return int(stem) if stem.isdigit() else 0
+
+
+def resolve_raw_dir(app_store_dir, device_key, lang):
+    """Return the raw-screenshot dir for (device, lang) across supported layouts, or None."""
+    candidates = [
+        os.path.join(app_store_dir, "screenshots", "raw", device_key, lang),
+        os.path.join(app_store_dir, lang, "screenshots", "raw", device_key),
+    ]
+    for d in candidates:
+        if os.path.isdir(d):
+            return d
+    return None
+
+
+def list_raw_files(raw_dir):
+    """Sorted PNG filenames (by numeric sequence) in a raw dir, or [] if dir is None/empty."""
+    if not raw_dir or not os.path.isdir(raw_dir):
+        return []
+    return sorted(
+        [f for f in os.listdir(raw_dir) if f.endswith(".png")],
+        key=_seq_key,
+    )
+
+
+def resolve_screens_json(app_store_dir, lang):
+    """Return the path to a language's screens.json (caption text), or None.
+
+    Tries the supported layouts, then a case-insensitive directory match
+    (e.g. 'zh-Hant' vs 'zh-hant')."""
+    candidates = [
+        os.path.join(app_store_dir, "screenshots", "info", lang, "screens.json"),
+        os.path.join(app_store_dir, lang, "screens.json"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    info_dir = os.path.join(app_store_dir, "screenshots", "info")
+    if os.path.isdir(info_dir):
+        for d in os.listdir(info_dir):
+            if d.lower() == lang.lower():
+                candidate = os.path.join(info_dir, d, "screens.json")
+                if os.path.exists(candidate):
+                    return candidate
+    return None
+
+
 def process_all(app_store_dir, languages, device_keys, seq_filter, frames_dir, force, dry_run, color_name=None):
     screens_json = os.path.join(app_store_dir, "screens.json")
     with open(screens_json) as f:
@@ -567,23 +617,16 @@ def process_all(app_store_dir, languages, device_keys, seq_filter, frames_dir, f
     composed = 0
 
     for lang in languages:
-        # Try multiple locations for per-language screen text
-        lang_screens_path = os.path.join(app_store_dir, "screenshots", "info", lang, "screens.json")
-        if not os.path.exists(lang_screens_path):
-            lang_screens_path = os.path.join(app_store_dir, lang, "screens.json")
-        if not os.path.exists(lang_screens_path):
-            # Try case-insensitive match (e.g. zh-Hant vs zh-hant)
-            info_dir = os.path.join(app_store_dir, "screenshots", "info")
-            if os.path.isdir(info_dir):
-                for d in os.listdir(info_dir):
-                    if d.lower() == lang.lower():
-                        candidate = os.path.join(info_dir, d, "screens.json")
-                        if os.path.exists(candidate):
-                            lang_screens_path = candidate
-                            break
-        if not os.path.exists(lang_screens_path):
-            print(f"  Warning: screens.json not found for '{lang}', skipping.")
-            continue
+        # Per-language caption text, falling back to English when this language has
+        # no screens.json — so it still composes (with English captions) rather than
+        # being skipped. Pairs with the per-sequence and raw English fallbacks below.
+        lang_screens_path = resolve_screens_json(app_store_dir, lang)
+        if lang_screens_path is None:
+            lang_screens_path = resolve_screens_json(app_store_dir, "en")
+            if lang_screens_path is None:
+                print(f"  Warning: no screens.json for '{lang}' or 'en', skipping.")
+                continue
+            print(f"  Note: no screens.json for '{lang}'; using English captions.")
         with open(lang_screens_path) as f:
             screens_text = json.load(f)
 
@@ -592,23 +635,25 @@ def process_all(app_store_dir, languages, device_keys, seq_filter, frames_dir, f
                 print(f"  Warning: device '{device_key}' not in screens.json, skipping.")
                 continue
 
-            # Try multiple raw directory layouts
-            raw_dir = os.path.join(app_store_dir, "screenshots", "raw", device_key, lang)
-            if not os.path.isdir(raw_dir):
-                raw_dir = os.path.join(app_store_dir, lang, "screenshots", "raw", device_key)
+            # Resolve raw screenshots for this language, falling back to English
+            # when a raw screenshot does not exist for the language.
+            raw_dir = resolve_raw_dir(app_store_dir, device_key, lang)
+            en_raw_dir = resolve_raw_dir(app_store_dir, device_key, "en") if lang != "en" else None
             out_dir = os.path.join(app_store_dir, "screenshots", "store", device_key, lang)
 
-            if not os.path.isdir(raw_dir):
-                print(f"  Warning: raw dir not found: {raw_dir}, skipping.")
-                continue
+            lang_files = list_raw_files(raw_dir)
+            en_files = list_raw_files(en_raw_dir)
+            lang_set = set(lang_files)
 
-            raw_files = sorted(
-                [f for f in os.listdir(raw_dir) if f.endswith(".png")],
-                key=lambda x: int(x.replace(".png", "")) if x.replace(".png", "").isdigit() else 0,
-            )
-            if not raw_files:
-                print(f"  Warning: no raw PNGs in {raw_dir}, skipping.")
+            if not lang_files and not en_files:
+                print(f"  Warning: no raw screenshots for '{lang}' (or 'en' fallback): {device_key}, skipping.")
                 continue
+            if not lang_files:
+                print(f"  Note: no raw screenshots for '{lang}' ({device_key}); using 'en' raws.")
+
+            # Compose this language's own screenshots, plus any English ones it is
+            # missing, so every language gets a full set.
+            raw_files = sorted(lang_set | set(en_files), key=_seq_key)
 
             canvas_w, canvas_h = all_devices[device_key]
             config = DeviceConfig(device_key, canvas_w, canvas_h)
@@ -620,23 +665,26 @@ def process_all(app_store_dir, languages, device_keys, seq_filter, frames_dir, f
 
                 total += 1
 
-                if seq - 1 >= len(screens_text):
-                    print(f"  Warning: no text for seq {seq} in {lang}/screens.json, skipping.")
-                    continue
-
-                text_entry = screens_text[seq - 1]
+                text_entry = screens_text[seq - 1] if seq - 1 < len(screens_text) else None
                 if text_entry is None:
-                    # Fall back to English text if translation is missing
+                    # Fall back to English text when this language is missing it
+                    # (missing entry, or a sequence only present via the English raws).
                     en_path = os.path.join(app_store_dir, "screenshots", "info", "en", "screens.json")
                     if not os.path.exists(en_path):
                         en_path = os.path.join(app_store_dir, "en", "screens.json")
-                    if os.path.exists(en_path) and seq - 1 < len(json.load(open(en_path))):
-                        text_entry = json.load(open(en_path))[seq - 1]
+                    if os.path.exists(en_path):
+                        en_texts = json.load(open(en_path))
+                        if seq - 1 < len(en_texts):
+                            text_entry = en_texts[seq - 1]
                     if text_entry is None:
                         text_entry = {}
                 title = text_entry.get("title", "")
                 subtitle = text_entry.get("text", "")
-                raw_path = os.path.join(raw_dir, raw_file)
+                # Prefer this language's raw screenshot; fall back to English when missing.
+                if raw_file in lang_set:
+                    raw_path = os.path.join(raw_dir, raw_file)
+                else:
+                    raw_path = os.path.join(en_raw_dir, raw_file)
                 out_path = os.path.join(out_dir, raw_file)
 
                 if not force and os.path.exists(out_path):

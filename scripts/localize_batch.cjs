@@ -45,6 +45,8 @@ function printUsage() {
   console.error('  --lang-batch <n>   Max languages per API call (default: all at once)');
   console.error('  --word-limit <n>   Target words × languages per API call (default: 1000).')
   console.error('                     Controls batching only — all strings are always translated.');
+  console.error('  --keep <term>      Brand/proper noun to keep verbatim (repeatable). Also');
+  console.error('                     reads comma-separated LOCALIZE_KEEP_TERMS env var.');
 }
 
 let localesDir = null;
@@ -54,6 +56,7 @@ let envFile = null;
 let batchLimit = 500;
 let langBatch = 0; // 0 = all languages at once
 let wordLimit = 1000; // max words × languages per API call
+let keepTerms = []; // brand/proper nouns to never translate (e.g. the app name)
 
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
@@ -67,6 +70,8 @@ for (let i = 0; i < args.length; i++) {
     langBatch = parseInt(args[++i], 10);
   } else if (arg === '--word-limit' && args[i + 1]) {
     wordLimit = parseInt(args[++i], 10);
+  } else if (arg === '--keep' && args[i + 1]) {
+    keepTerms.push(args[++i]);
   } else if (arg === '--help' || arg === '-h') {
     printUsage();
     process.exit(0);
@@ -120,6 +125,11 @@ if (!apiKey) {
   process.exit(1);
 }
 
+// Brand/proper-noun terms to keep verbatim: CLI --keep wins, else env var.
+if (keepTerms.length === 0 && process.env.LOCALIZE_KEEP_TERMS) {
+  keepTerms = process.env.LOCALIZE_KEEP_TERMS.split(',').map(s => s.trim()).filter(Boolean);
+}
+
 // --- Source / Target Setup ---
 
 const sourceDir = path.join(localesDir, 'en');
@@ -155,6 +165,49 @@ function cleanRTLText(text) {
     .replace(/[\u061C]/g, '')
     .replace(/[\uFEFF]/g, '')
     .trim();
+}
+
+// --- Non-translatable values ---
+
+/**
+ * Strings that are data, not prose, and must pass through verbatim: URLs, email
+ * addresses, and ISO dates. Sending these to the translator corrupts them (e.g. a
+ * support URL or a date getting "translated"), so they are never sent and are copied
+ * straight from the source into every target file.
+ */
+function isNonTranslatable(value) {
+  const v = String(value).trim();
+  if (!v) return false;
+  if (/^(https?|ftp):\/\/\S+$/i.test(v)) return true; // URL with scheme
+  if (/^www\.\S+$/i.test(v)) return true;             // bare www URL
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return true; // email address
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return true;     // ISO date (YYYY-MM-DD)
+  return false;
+}
+
+// --- Brand term protection ---
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Replace each keep-term (brand/proper noun) with a sentinel the translator leaves
+ * untouched, so the name is never translated inside otherwise-translatable prose.
+ * Restored verbatim by restoreTerms() after translation.
+ */
+function protectTerms(text) {
+  if (!keepTerms.length) return text;
+  let out = String(text);
+  keepTerms.forEach((term, i) => {
+    out = out.replace(new RegExp(`\\b${escapeRegExp(term)}\\b`, 'gi'), `__DNT${i}__`);
+  });
+  return out;
+}
+
+function restoreTerms(text) {
+  if (!keepTerms.length) return text;
+  return String(text).replace(/__DNT(\d+)__/g, (m, i) => (keepTerms[Number(i)] ?? m));
 }
 
 // --- JSON Traversal Helpers ---
@@ -210,6 +263,8 @@ function getNestedValue(obj, dotPath) {
 function buildTargetObject(source, existing, newTranslations, lang, prefix = '') {
   if (typeof source === 'string') {
     if (source === '') return '';
+    // URLs, emails and dates are copied straight from the source, never translated.
+    if (isNonTranslatable(source)) return source;
     // Use existing valid translation
     if (existing && typeof existing === 'string' && existing.trim() !== '') {
       return existing;
@@ -358,6 +413,11 @@ async function main() {
     console.log('-'.repeat(40));
 
     const sourceContent = JSON.parse(fs.readFileSync(path.join(sourceDir, file), 'utf8'));
+    // Drop tool config (e.g. the `localize` block) — it is not localizable content and
+    // must not be flattened, translated, or copied into target files.
+    if (sourceContent && typeof sourceContent === 'object' && !Array.isArray(sourceContent)) {
+      delete sourceContent.localize;
+    }
     const allStrings = flattenStrings(sourceContent);
 
     // Load existing translations for each language
@@ -379,6 +439,7 @@ async function main() {
       missingPathsByLang[lang] = new Set();
       for (const { path: p, value } of allStrings) {
         if (value === '') continue;
+        if (isNonTranslatable(value)) continue; // URLs, emails, dates: never translate
         const existing = getNestedValue(existingByLang[lang], p);
         if (!existing || (typeof existing === 'string' && existing.trim() === '')) {
           missingPathsByLang[lang].add(p);
@@ -490,7 +551,7 @@ async function main() {
 
         try {
           const translations = await translateBatch(
-            batchEntries.map(entry => entry.value),
+            batchEntries.map(entry => protectTerms(entry.value)),
             langChunk
           );
 
@@ -505,7 +566,7 @@ async function main() {
             }
             for (let j = 0; j < batchEntries.length; j++) {
               if (translated[j]) {
-                translationsByLang[lang][batchEntries[j].path] = translated[j];
+                translationsByLang[lang][batchEntries[j].path] = restoreTerms(translated[j]);
               }
             }
           }

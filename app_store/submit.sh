@@ -85,14 +85,42 @@ for platform in "${PLATFORMS[@]}"; do
       echo "══════════════════════════════════════════════════════════════"
       echo ""
 
-      # Validate Apple credentials
-      if [ -z "$APPLE_API_KEY_ID" ] || [ -z "$APPLE_API_ISSUER_ID" ]; then
-        echo "Error: APPLE_API_KEY_ID and APPLE_API_ISSUER_ID must be set in .env"
+      # Apple credentials. The project .env may set them, but any value left
+      # unset or stubbed is filled from the shared developer key store
+      # (~/.develop/.keys, same convention as localize.sh) so the secrets live in
+      # one place outside every repo. The private key likewise comes from
+      # ~/.develop/apple.p8, falling back to a project-local key if present.
+      # dev_key NAME [ALIAS...] — first matching value from the dev key stores.
+      dev_key() {
+        local f name line
+        for f in "$HOME/.develop/.keys" "$HOME/.keys" "$HOME/.keys.txt"; do
+          [ -f "$f" ] || continue
+          for name in "$@"; do
+            line=$(grep -h "^$name=" "$f" 2>/dev/null | head -1 || true)
+            if [ -n "$line" ]; then printf '%s' "${line#*=}"; return 0; fi
+          done
+        done
+        return 0
+      }
+      if [ -z "${APPLE_API_KEY_ID:-}" ] || [ "${APPLE_API_KEY_ID:-}" = "STUB" ]; then
+        _v="$(dev_key APPLE_API_KEY_ID APPSTORE_CONNECT_KEY_ID)"; [ -n "$_v" ] && APPLE_API_KEY_ID="$_v"
+      fi
+      if [ -z "${APPLE_API_ISSUER_ID:-}" ] || [ "${APPLE_API_ISSUER_ID:-}" = "STUB" ]; then
+        _v="$(dev_key APPLE_API_ISSUER_ID APPSTORE_CONNECT_ISSUER_ID)"; [ -n "$_v" ] && APPLE_API_ISSUER_ID="$_v"
+      fi
+
+      if [ -z "$APPLE_API_KEY_ID" ] || [ "$APPLE_API_KEY_ID" = "STUB" ] \
+         || [ -z "$APPLE_API_ISSUER_ID" ] || [ "$APPLE_API_ISSUER_ID" = "STUB" ]; then
+        echo "Error: APPLE_API_KEY_ID and APPLE_API_ISSUER_ID must be set in .env or ~/.develop/.keys"
         exit 1
       fi
-      APPLE_KEY_FILE="$APP_STORE_DIR/.keys/apple.p8"
-      if [ ! -f "$APPLE_KEY_FILE" ]; then
-        echo "Error: Apple API key not found at $APPLE_KEY_FILE"
+
+      APPLE_KEY_FILE="$HOME/.develop/apple.p8"
+      if [ ! -s "$APPLE_KEY_FILE" ] && [ -s "$APP_STORE_DIR/.keys/apple.p8" ]; then
+        APPLE_KEY_FILE="$APP_STORE_DIR/.keys/apple.p8"
+      fi
+      if [ ! -s "$APPLE_KEY_FILE" ]; then
+        echo "Error: Apple API key not found (looked in ~/.develop/apple.p8 and $APP_STORE_DIR/.keys/apple.p8)"
         echo "Download from App Store Connect > Users and Access > Integrations > App Store Connect API"
         exit 1
       fi

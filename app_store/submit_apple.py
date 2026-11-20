@@ -48,6 +48,7 @@ LOCALE_MAP = {
 # Screenshot display type mapping
 SCREENSHOT_DISPLAY_TYPES = {
     "iphone_6_9": "APP_IPHONE_67",
+    "iphone_duo": "APP_IPHONE_DUO",
     "ipad_13": "APP_IPAD_PRO_3GEN_129",
     "macos_desktop": "APP_DESKTOP",
 }
@@ -55,6 +56,7 @@ SCREENSHOT_DISPLAY_TYPES = {
 # Map device keys to App Store Connect platform
 DEVICE_PLATFORM_MAP = {
     "iphone_6_9": "IOS",
+    "iphone_duo": "IOS",
     "ipad_13": "IOS",
     "macos_desktop": "MAC_OS",
 }
@@ -155,6 +157,8 @@ def api_request(method, path, token, data=None):
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8")
         print(f"API Error {e.code}: {error_body}", file=sys.stderr)
+        # Preserve the body so callers can branch on it (the stream is now spent).
+        e.error_body = error_body
         raise
 
 
@@ -504,19 +508,22 @@ def update_app_info_localization(token, app_id, locale, listing):
     )
 
     loc_id = None
+    existing_name = None
     for loc in resp.get("data", []):
-        if loc["attributes"]["locale"] == locale:
+        a = loc["attributes"]
+        # Remember any already-set app name so new locales can reuse it.
+        if a.get("name") and not existing_name:
+            existing_name = a["name"]
+        if a["locale"] == locale:
             loc_id = loc["id"]
-            break
 
     attrs = {}
     if listing.get("subtitle"):
         attrs["subtitle"] = listing["subtitle"]
 
-    if not attrs:
-        return
-
     if loc_id:
+        if not attrs:
+            return
         data = {
             "data": {
                 "type": "appInfoLocalizations",
@@ -526,6 +533,16 @@ def update_app_info_localization(token, app_id, locale, listing):
         }
         api_request("PATCH", f"/appInfoLocalizations/{loc_id}", token, data)
     else:
+        # Creating a locale: App Store Connect requires `name`. The app name is
+        # a brand, identical across locales, so reuse an existing localization's
+        # name; fall back to the listing's name/title, trimmed to the 30-char
+        # App Store limit.
+        name = existing_name or listing.get("name") or listing.get("title") or ""
+        name = name[:30]
+        if not name:
+            print(f"  Warning: no app name available for {locale}; skipping app info.", file=sys.stderr)
+            return
+        attrs["name"] = name
         attrs["locale"] = locale
         data = {
             "data": {
@@ -577,32 +594,48 @@ def update_localization(token, version_id, locale, listing):
     if listing.get("supportUrl"):
         attrs["supportUrl"] = listing["supportUrl"]
 
-    if loc_id:
-        data = {
-            "data": {
-                "type": "appStoreVersionLocalizations",
-                "id": loc_id,
-                "attributes": attrs,
+    def send(attrs_to_send):
+        if loc_id:
+            data = {
+                "data": {
+                    "type": "appStoreVersionLocalizations",
+                    "id": loc_id,
+                    "attributes": attrs_to_send,
+                }
             }
-        }
-        api_request("PATCH", f"/appStoreVersionLocalizations/{loc_id}", token, data)
-    else:
-        attrs["locale"] = locale
-        data = {
-            "data": {
-                "type": "appStoreVersionLocalizations",
-                "attributes": attrs,
-                "relationships": {
-                    "appStoreVersion": {
-                        "data": {
-                            "type": "appStoreVersions",
-                            "id": version_id,
+            api_request("PATCH", f"/appStoreVersionLocalizations/{loc_id}", token, data)
+        else:
+            a = dict(attrs_to_send)
+            a["locale"] = locale
+            data = {
+                "data": {
+                    "type": "appStoreVersionLocalizations",
+                    "attributes": a,
+                    "relationships": {
+                        "appStoreVersion": {
+                            "data": {
+                                "type": "appStoreVersions",
+                                "id": version_id,
+                            }
                         }
-                    }
-                },
+                    },
+                }
             }
-        }
-        api_request("POST", "/appStoreVersionLocalizations", token, data)
+            api_request("POST", "/appStoreVersionLocalizations", token, data)
+
+    try:
+        send(attrs)
+    except urllib.error.HTTPError as e:
+        # A first version (nothing released yet) rejects whatsNew, and the whole
+        # request fails with it. Drop whatsNew and retry so the rest of the
+        # fields (description, keywords, URLs…) still go through.
+        body = getattr(e, "error_body", "") or ""
+        if "whatsNew" in attrs and "whatsNew" in body:
+            attrs.pop("whatsNew", None)
+            print(f"  [{locale}] retrying without whatsNew (not editable for this version)...", file=sys.stderr)
+            send(attrs)
+        else:
+            raise
 
 
 def upload_all_screenshots(token, version_ids, app_store_dir):
@@ -681,7 +714,11 @@ def upload_all_screenshots(token, version_ids, app_store_dir):
 
 def _device_family(display_type):
     """Return device family prefix (e.g. 'APP_IPHONE' from 'APP_IPHONE_67')."""
-    for prefix in ("APP_IPHONE", "APP_IPAD", "APP_DESKTOP", "APP_APPLE_TV", "APP_WATCH"):
+    # APP_IPHONE_DUO is its own family: it coexists with the regular iPhone
+    # (e.g. APP_IPHONE_67) slot, so it must NOT be treated as the same family
+    # (which would make the set-replacement logic delete the other). Its more
+    # specific prefix is checked first.
+    for prefix in ("APP_IPHONE_DUO", "APP_IPHONE", "APP_IPAD", "APP_DESKTOP", "APP_APPLE_TV", "APP_WATCH"):
         if display_type.startswith(prefix):
             return prefix
     return display_type
